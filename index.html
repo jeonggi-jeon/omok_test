@@ -20,9 +20,10 @@
         --gold: #ffd76a;
         --lose-glow: #8b9cff;
         --timer-warn: #ff7a70;
-        --board-margin: 14px;
-        --step: min(1.85rem, 4.8vw);
-        --board-side: calc(var(--board-margin) * 2 + var(--step) * 14);
+        --board-margin: 18px;
+        /* 교차점 19×19 → 한 변 간격 개수 18 */
+        --step: min(2.08rem, 5.65vw);
+        --board-side: calc(var(--board-margin) * 2 + var(--step) * 18);
       }
 
       * {
@@ -148,12 +149,19 @@
         text-shadow: 0 0 24px rgba(110, 176, 255, 0.25);
       }
 
-      .toolbar .last-move {
+      .toolbar .game-record {
         margin: 0;
+        margin-right: auto;
         font-size: 0.88rem;
+        font-variant-numeric: tabular-nums;
         color: var(--muted);
-        flex: 1 1 auto;
-        min-width: 10rem;
+        flex: 0 1 auto;
+        min-width: 0;
+      }
+
+      .toolbar .game-record strong {
+        color: var(--text);
+        font-weight: 700;
       }
 
       .timer-panel {
@@ -216,6 +224,7 @@
       }
 
       #restart {
+        flex-shrink: 0;
         font: inherit;
         padding: 0.5rem 1.15rem;
         border-radius: 0.45rem;
@@ -249,6 +258,304 @@
           0 0 60px rgba(110, 176, 255, 0.12);
       }
 
+      /* 연승 단계별 판 외곽 효과 — 착수는 #board에서 처리, 효과만 덮음 */
+      .board-wrap.board-wrap--victory-next {
+        position: relative;
+        border: 3px solid transparent;
+      }
+
+      /* 1연승 — 꽃잎: 부드러운 분홍·금 테두리 */
+      @keyframes victory-petal-flow {
+        0%,
+        100% {
+          background-position: 0 0, 12% 40%;
+        }
+        50% {
+          background-position: 0 0, 88% 60%;
+        }
+      }
+
+      @keyframes victory-petal-glow {
+        0%,
+        100% {
+          box-shadow:
+            0 20px 50px rgba(0, 0, 0, 0.5),
+            0 0 0 1px rgba(255, 200, 220, 0.1) inset,
+            0 0 48px rgba(255, 158, 185, 0.45),
+            0 0 80px rgba(255, 215, 106, 0.22);
+        }
+        50% {
+          box-shadow:
+            0 22px 54px rgba(0, 0, 0, 0.46),
+            0 0 0 1px rgba(255, 230, 240, 0.14) inset,
+            0 0 62px rgba(255, 182, 210, 0.55),
+            0 0 96px rgba(255, 215, 106, 0.32);
+        }
+      }
+
+      .board-wrap.board-wrap--victory-tier-1 {
+        background:
+          linear-gradient(165deg, rgba(46, 38, 52, 0.96), rgba(26, 22, 34, 0.99)) padding-box,
+          linear-gradient(
+              135deg,
+              #ffb7c8,
+              #ffc9a8,
+              var(--gold),
+              #ffa8d8,
+              #ffb7c8
+            )
+            border-box;
+        background-size: auto, 280% 280%;
+        animation:
+          victory-petal-flow 8s ease-in-out infinite,
+          victory-petal-glow 3.5s ease-in-out infinite;
+      }
+
+      /* 2연승 — 눈: 차가운 흰·청 테두리, 반짝임 */
+      @keyframes victory-snow-shimmer {
+        0%,
+        100% {
+          background-position: 0 0, 20% 50%;
+        }
+        50% {
+          background-position: 0 0, 80% 50%;
+        }
+      }
+
+      @keyframes victory-snow-shadow {
+        0%,
+        100% {
+          box-shadow:
+            0 20px 52px rgba(0, 0, 0, 0.55),
+            0 0 0 1px rgba(200, 230, 255, 0.12) inset,
+            0 0 50px rgba(180, 220, 255, 0.45),
+            0 0 85px rgba(220, 240, 255, 0.25);
+        }
+        50% {
+          box-shadow:
+            0 22px 56px rgba(0, 0, 0, 0.48),
+            0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+            0 0 68px rgba(140, 200, 255, 0.5),
+            0 0 100px rgba(110, 176, 255, 0.3);
+        }
+      }
+
+      .board-wrap.board-wrap--victory-tier-2 {
+        background:
+          linear-gradient(165deg, rgba(34, 40, 56, 0.98), rgba(20, 24, 36, 0.99)) padding-box,
+          linear-gradient(
+              110deg,
+              #e8f4ff,
+              #b8dcff,
+              #9ecfff,
+              #dceeff,
+              #e8f4ff
+            )
+            border-box;
+        background-size: auto, 300% 300%;
+        animation:
+          victory-snow-shimmer 5s ease-in-out infinite,
+          victory-snow-shadow 2.8s ease-in-out infinite;
+      }
+
+      /* 3연승 — 무지개: 색 순환 테두리 */
+      @keyframes victory-rainbow-move {
+        0% {
+          background-position: 0 0, 0% 50%;
+        }
+        100% {
+          background-position: 0 0, 200% 50%;
+        }
+      }
+
+      @keyframes victory-rainbow-halo {
+        0%,
+        100% {
+          box-shadow:
+            0 20px 56px rgba(0, 0, 0, 0.52),
+            0 0 50px rgba(255, 100, 150, 0.32),
+            0 0 88px rgba(100, 200, 255, 0.3);
+        }
+        33% {
+          box-shadow:
+            0 20px 56px rgba(0, 0, 0, 0.5),
+            0 0 55px rgba(100, 255, 180, 0.35),
+            0 0 90px rgba(200, 150, 255, 0.32);
+        }
+        66% {
+          box-shadow:
+            0 20px 56px rgba(0, 0, 0, 0.5),
+            0 0 58px rgba(255, 200, 100, 0.36),
+            0 0 95px rgba(120, 180, 255, 0.3);
+        }
+      }
+
+      .board-wrap.board-wrap--victory-tier-3 {
+        background:
+          linear-gradient(165deg, rgba(38, 40, 58, 0.97), rgba(18, 20, 32, 0.99)) padding-box,
+          linear-gradient(
+              90deg,
+              #ff5c5c,
+              #ffd13a,
+              #6cf5a8,
+              #5cb3ff,
+              #c77bff,
+              #ff5c5c
+            )
+            border-box;
+        background-size: auto, 200% 100%;
+        animation:
+          victory-rainbow-move 4s linear infinite,
+          victory-rainbow-halo 5s ease-in-out infinite;
+      }
+
+      /* 4연승 — 오로라: 청록·보라 흐름 */
+      @keyframes victory-aurora {
+        0%,
+        100% {
+          background-position: 0 0, 10% 30%;
+        }
+        33% {
+          background-position: 0 0, 70% 50%;
+        }
+        66% {
+          background-position: 0 0, 40% 70%;
+        }
+      }
+
+      @keyframes victory-aurora-pulse {
+        0%,
+        100% {
+          box-shadow:
+            0 22px 58px rgba(0, 0, 0, 0.52),
+            0 0 58px rgba(80, 255, 200, 0.28),
+            0 0 102px rgba(160, 100, 255, 0.32);
+        }
+        50% {
+          box-shadow:
+            0 24px 62px rgba(0, 0, 0, 0.48),
+            0 0 72px rgba(120, 255, 210, 0.4),
+            0 0 120px rgba(180, 120, 255, 0.38);
+        }
+      }
+
+      .board-wrap.board-wrap--victory-tier-4 {
+        background:
+          linear-gradient(165deg, rgba(30, 36, 52, 0.98), rgba(16, 20, 36, 0.99)) padding-box,
+          linear-gradient(
+              200deg,
+              #4fffd1,
+              #7b8cff,
+              #e86cff,
+              #40d9a0,
+              #7b8cff
+            )
+            border-box;
+        background-size: auto, 320% 320%;
+        animation:
+          victory-aurora 9s ease-in-out infinite,
+          victory-aurora-pulse 3.2s ease-in-out infinite;
+      }
+
+      /* 5연승 — 별빛: 금·흰 점편 광택 */
+      @keyframes victory-star-twinkle {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        40% {
+          opacity: 0.96;
+        }
+        70% {
+          opacity: 1;
+        }
+      }
+
+      .board-wrap.board-wrap--victory-tier-5 {
+        background:
+          linear-gradient(165deg, rgba(36, 32, 52, 0.98), rgba(14, 14, 28, 0.99)) padding-box,
+          linear-gradient(
+              150deg,
+              #fff8e8,
+              var(--gold),
+              #ffe8ff,
+              #c5e8ff,
+              var(--gold),
+              #fff8e8
+            )
+            border-box;
+        background-size: auto, 260% 260%;
+        animation:
+          victory-board-gradient-generic 7s ease-in-out infinite,
+          victory-star-twinkle 2.4s ease-in-out infinite;
+        box-shadow:
+          0 24px 60px rgba(0, 0, 0, 0.55),
+          0 0 60px rgba(255, 215, 106, 0.42),
+          0 0 110px rgba(180, 200, 255, 0.35),
+          0 0 140px rgba(255, 158, 205, 0.18);
+      }
+
+      @keyframes victory-board-gradient-generic {
+        0%,
+        100% {
+          background-position: 0 0, 15% 40%;
+        }
+        50% {
+          background-position: 0 0, 85% 60%;
+        }
+      }
+
+      /* 6연승 이상 — 무지개 + 금 빛 종합 */
+      @keyframes victory-ultimate-rainbow {
+        0% {
+          background-position: 0 0, 0% 50%;
+        }
+        50% {
+          background-position: 0 0, 100% 50%;
+        }
+        100% {
+          background-position: 0 0, 200% 50%;
+        }
+      }
+
+      @keyframes victory-ultimate-pulse {
+        0%,
+        100% {
+          box-shadow:
+            0 26px 64px rgba(0, 0, 0, 0.55),
+            0 0 70px rgba(255, 215, 106, 0.5),
+            0 0 120px rgba(110, 176, 255, 0.42),
+            0 0 160px rgba(255, 158, 205, 0.28);
+        }
+        50% {
+          box-shadow:
+            0 28px 68px rgba(0, 0, 0, 0.5),
+            0 0 90px rgba(255, 158, 205, 0.55),
+            0 0 140px rgba(110, 176, 255, 0.48),
+            0 0 190px rgba(255, 215, 106, 0.35);
+        }
+      }
+
+      .board-wrap.board-wrap--victory-tier-6 {
+        background:
+          linear-gradient(165deg, rgba(42, 38, 62, 0.97), rgba(20, 18, 40, 0.99)) padding-box,
+          linear-gradient(
+              60deg,
+              #ff6b9d,
+              #ffd56f,
+              #6af0c4,
+              #6eb0ff,
+              #d89cff,
+              #ff8ec8,
+              #ff6b9d
+            )
+            border-box;
+        background-size: auto, 400% 400%;
+        animation:
+          victory-ultimate-rainbow 6s ease-in-out infinite,
+          victory-ultimate-pulse 2.6s ease-in-out infinite;
+      }
+
       #board.board {
         position: relative;
         width: var(--board-side);
@@ -257,12 +564,271 @@
         margin: 0 auto;
       }
 
+      /* 플레이어 승리 후 다음 판 — 격자 판(#board) 본체에 보조 광택(테두리 효과는 .board-wrap 연승 등급과 함께) */
+      @keyframes victory-board-face-glow {
+        0%,
+        100% {
+          filter: saturate(1.05) brightness(1.02);
+          box-shadow:
+            0 0 0 2px rgba(255, 220, 160, 0.2),
+            0 0 32px rgba(255, 200, 120, 0.12),
+            inset 0 0 40px rgba(255, 230, 200, 0.06);
+        }
+        50% {
+          filter: saturate(1.12) brightness(1.05);
+          box-shadow:
+            0 0 0 2px rgba(255, 235, 190, 0.32),
+            0 0 44px rgba(255, 210, 140, 0.2),
+            inset 0 0 52px rgba(255, 240, 210, 0.1);
+        }
+      }
+
+      .board-wrap.board-wrap--victory-next #board.board {
+        border-radius: 6px;
+        animation: victory-board-face-glow 3.2s ease-in-out infinite;
+      }
+
+      @keyframes victory-board-grid-warm {
+        0%,
+        100% {
+          filter: brightness(1);
+          box-shadow:
+            inset 0 0 0 1px rgba(58, 46, 34, 0.45),
+            inset 0 0 40px rgba(0, 0, 0, 0.12);
+        }
+        50% {
+          filter: brightness(1.06);
+          box-shadow:
+            inset 0 0 0 1px rgba(90, 72, 48, 0.55),
+            inset 0 0 48px rgba(80, 60, 30, 0.08);
+        }
+      }
+
+      .board-wrap.board-wrap--victory-next #board .board-lines {
+        animation: victory-board-grid-warm 3.4s ease-in-out infinite;
+      }
+
+      /* 5연속 확인 후 결과 창 전 — 판 전체 클릭 영역 */
+      #board.board .win-reveal-overlay {
+        position: absolute;
+        inset: 0;
+        z-index: 24;
+        margin: 0;
+        padding: 0;
+        border: none;
+        border-radius: inherit;
+        background: transparent;
+        cursor: pointer;
+      }
+
+      #board.board .win-reveal-overlay:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+      }
+
+      /* translate %는 요소 자신 크기 기준이라 판 높이만큼 안 내려감 → 컨테이너 높이(cqh) 사용 */
+      /* 1연승 보상 판 — 격자 안 눈송이 */
+      @keyframes board-snow-fall {
+        0% {
+          transform: translate3d(0, -12cqh, 0) rotate(0deg);
+          opacity: 0.92;
+        }
+        100% {
+          transform: translate3d(var(--drift), calc(100cqh + var(--size)), 0) rotate(300deg);
+          opacity: 0.45;
+        }
+      }
+
+      #board .board-snow {
+        position: absolute;
+        left: var(--board-margin);
+        top: var(--board-margin);
+        width: calc(18 * var(--step));
+        height: calc(18 * var(--step));
+        overflow: hidden;
+        pointer-events: none;
+        z-index: 12;
+        border-radius: 4px;
+        container-type: size;
+        container-name: board-fx-snow;
+      }
+
+      #board .board-snow .snowflake {
+        position: absolute;
+        left: calc(var(--x) * 1%);
+        top: 0;
+        width: var(--size);
+        height: var(--size);
+        margin-left: calc(var(--size) * -0.5);
+        border-radius: 50%;
+        background: radial-gradient(
+          circle at 32% 30%,
+          #fff,
+          rgba(230, 244, 255, 0.92) 45%,
+          rgba(200, 220, 255, 0.55) 100%
+        );
+        box-shadow:
+          0 0 5px rgba(255, 255, 255, 0.95),
+          0 0 10px rgba(200, 230, 255, 0.35);
+        animation: board-snow-fall var(--dur) linear infinite;
+        animation-delay: var(--delay);
+        will-change: transform;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #board .board-snow .snowflake {
+          animation: none;
+          opacity: 0;
+        }
+      }
+
+      /* 연승 2~ 보상 판 — 화려한 별송이가 위에서 아래로 */
+      @keyframes board-star-fall {
+        0% {
+          transform: translate3d(0, -18cqh, 0);
+          opacity: 1;
+        }
+        100% {
+          transform: translate3d(var(--drift), calc(100cqh + var(--sz)), 0);
+          opacity: 0.82;
+        }
+      }
+
+      @keyframes board-star-twinkle {
+        0%,
+        100% {
+          opacity: 1;
+          filter: brightness(1.25) drop-shadow(0 0 5px rgba(255, 250, 230, 0.95))
+            drop-shadow(0 0 12px rgba(255, 215, 120, 0.65));
+          transform: rotate(0deg) scale(1);
+        }
+        33% {
+          opacity: 0.95;
+          filter: brightness(1.65) drop-shadow(0 0 10px rgba(255, 235, 160, 1))
+            drop-shadow(0 0 22px rgba(186, 140, 255, 0.55))
+            hue-rotate(-12deg);
+          transform: rotate(120deg) scale(1.14);
+        }
+        66% {
+          opacity: 1;
+          filter: brightness(1.45) drop-shadow(0 0 8px rgba(180, 230, 255, 0.85))
+            drop-shadow(0 0 18px rgba(255, 200, 120, 0.5));
+          transform: rotate(240deg) scale(1.06);
+        }
+      }
+
+      @keyframes board-star-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      #board .board-stars {
+        position: absolute;
+        left: var(--board-margin);
+        top: var(--board-margin);
+        width: calc(18 * var(--step));
+        height: calc(18 * var(--step));
+        overflow: hidden;
+        pointer-events: none;
+        z-index: 13;
+        border-radius: 4px;
+        container-type: size;
+        container-name: board-fx-stars;
+      }
+
+      #board .board-stars .starfall {
+        position: absolute;
+        left: calc(var(--x) * 1%);
+        top: -2%;
+        width: var(--sz);
+        height: var(--sz);
+        margin-left: calc(var(--sz) * -0.5);
+        animation: board-star-fall var(--dur) linear infinite;
+        animation-delay: var(--delay);
+        will-change: transform;
+      }
+
+      #board .board-stars .starfall::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        animation:
+          board-star-twinkle 2.1s ease-in-out infinite,
+          board-star-spin 5.5s linear infinite;
+      }
+
+      #board .board-stars .starfall--v1::before {
+        clip-path: polygon(
+          50% 0%,
+          61% 35%,
+          98% 35%,
+          69% 57%,
+          79% 91%,
+          50% 72%,
+          21% 91%,
+          31% 57%,
+          2% 35%,
+          39% 35%
+        );
+        background: conic-gradient(
+          from 210deg at 45% 42%,
+          #fffef8,
+          #ffe08a,
+          #ffd700,
+          #fff8f0,
+          #e8c4ff,
+          #fffef8
+        );
+      }
+
+      #board .board-stars .starfall--v2::before {
+        clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+        background: linear-gradient(
+          135deg,
+          #fffefa,
+          #ffd54a 35%,
+          #ffec9f 55%,
+          #c5a8ff 100%
+        );
+        animation:
+          board-star-twinkle 1.65s ease-in-out infinite,
+          board-star-spin 4.2s linear infinite;
+      }
+
+      #board .board-stars .starfall--v3::before {
+        clip-path: polygon(
+          50% 4%,
+          60% 40%,
+          96% 40%,
+          68% 64%,
+          78% 96%,
+          50% 76%,
+          22% 96%,
+          32% 64%,
+          4% 40%,
+          40% 40%
+        );
+        background: radial-gradient(circle at 38% 32%, #ffffff, #fff2b0 38%, #d4a012 72%, #6b4fba);
+        animation:
+          board-star-twinkle 2.45s ease-in-out infinite reverse,
+          board-star-spin 6.8s linear infinite reverse;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #board .board-stars .starfall,
+        #board .board-stars .starfall::before {
+          animation: none !important;
+          opacity: 0 !important;
+        }
+      }
+
       #board .board-lines {
         position: absolute;
         left: var(--board-margin);
         top: var(--board-margin);
-        width: calc(14 * var(--step));
-        height: calc(14 * var(--step));
+        width: calc(18 * var(--step));
+        height: calc(18 * var(--step));
         border-radius: 4px;
         background-color: #d4a574;
         background-image: linear-gradient(#3a2e22 0 1px, transparent 1px),
@@ -278,9 +844,10 @@
         position: absolute;
         left: var(--board-margin);
         top: var(--board-margin);
-        width: calc(14 * var(--step));
-        height: calc(14 * var(--step));
+        width: calc(18 * var(--step));
+        height: calc(18 * var(--step));
         pointer-events: none;
+        z-index: 14;
       }
 
       #board .board-points .pt {
@@ -343,6 +910,55 @@
         box-shadow:
           0 2px 6px rgba(0, 0, 0, 0.28),
           inset 0 -1px 2px rgba(0, 0, 0, 0.08);
+      }
+
+      /* 가장 마지막으로 둔 돌 표시 — 링 회전 */
+      @keyframes last-stone-spin {
+        from {
+          transform: translate(-50%, -50%) rotate(0deg);
+        }
+        to {
+          transform: translate(-50%, -50%) rotate(360deg);
+        }
+      }
+
+      #board .board-points .pt.last-stone {
+        z-index: 6;
+      }
+
+      #board .board-points .pt.last-stone::before {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 118%;
+        height: 118%;
+        transform: translate(-50%, -50%);
+        border-radius: 50%;
+        pointer-events: none;
+        box-sizing: border-box;
+        border-style: dashed;
+        border-width: 3px;
+        background: transparent;
+        will-change: transform;
+      }
+
+      #board .board-points .pt.last-stone.black::before {
+        border-color: rgba(110, 176, 255, 0.35);
+        border-top-color: rgba(110, 176, 255, 0.98);
+        border-right-color: rgba(255, 158, 205, 0.88);
+        border-bottom-color: rgba(255, 215, 106, 0.65);
+        box-shadow: 0 0 14px rgba(110, 176, 255, 0.35);
+        animation: last-stone-spin 1.65s linear infinite;
+      }
+
+      #board .board-points .pt.last-stone.white::before {
+        border-color: rgba(255, 215, 106, 0.35);
+        border-top-color: rgba(255, 215, 106, 0.95);
+        border-right-color: rgba(110, 176, 255, 0.88);
+        border-bottom-color: rgba(255, 158, 205, 0.65);
+        box-shadow: 0 0 14px rgba(255, 215, 106, 0.32);
+        animation: last-stone-spin 1.65s linear infinite reverse;
       }
 
       /* 승리한 5연속 돌 하이라이트 */
@@ -487,6 +1103,37 @@
         gap: 0.5rem;
       }
 
+      .dialog-actions-win {
+        flex-wrap: wrap;
+        justify-content: stretch;
+      }
+
+      .dialog-actions-win .dialog-choice {
+        flex: 1 1 10rem;
+        font: inherit;
+        padding: 0.55rem 1rem;
+        border-radius: 0.45rem;
+        border: 1px solid rgba(255, 215, 106, 0.55);
+        background: linear-gradient(180deg, rgba(255, 215, 106, 0.35), rgba(90, 70, 40, 0.35));
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .dialog-actions-win .dialog-choice:hover {
+        filter: brightness(1.08);
+      }
+
+      .dialog-actions-win .dialog-choice-alt {
+        border-color: rgba(200, 220, 255, 0.55);
+        background: linear-gradient(180deg, rgba(160, 200, 255, 0.3), rgba(80, 100, 140, 0.35));
+      }
+
+      .dialog-actions-win .dialog-choice:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
       dialog.result-dialog button[type="submit"] {
         font: inherit;
         padding: 0.5rem 1.2rem;
@@ -510,6 +1157,7 @@
 
       .board-section {
         position: relative;
+        overflow: visible;
       }
 
       .welcome-layer {
@@ -596,6 +1244,11 @@
       </div>
 
       <header class="toolbar">
+        <p id="game-record" class="game-record" aria-live="polite">
+          전적 · 승 <strong id="record-win">0</strong> · 패 <strong id="record-loss">0</strong> · 무
+          <strong id="record-draw">0</strong>
+        </p>
+        <button type="button" id="restart">다시 시작</button>
         <p id="status" class="status" aria-live="polite">게임 시작 버튼을 눌러 주세요.</p>
         <div
           id="timer-panel"
@@ -617,28 +1270,30 @@
             <div id="timer-fill" class="timer-fill"></div>
           </div>
         </div>
-        <p id="last-move" class="last-move" aria-live="polite">착수 위치 · 흑 — · 백 —</p>
-        <button type="button" id="restart">다시 시작</button>
       </header>
 
       <div class="board-section">
         <div id="welcome-layer" class="welcome-layer" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
           <div class="welcome-card">
             <h2 id="welcome-title">대국 시작</h2>
-            <p>게임 시작을 누르면 흑으로 착수하며, 20초 안에 두지 않으면 차례가 넘어갑니다.</p>
+            <p>
+              게임 시작 시 흑(선공)으로 둡니다. 승리하면 다음 판에 백(후공)을 선택할 수 있어요. 20초 안에 두지 않으면 차례가 넘어갑니다.
+            </p>
             <button type="button" id="btn-start">게임 시작</button>
           </div>
         </div>
-        <main class="board-wrap">
+        <main id="board-shell" class="board-wrap">
           <div
             id="board"
             class="board"
             role="grid"
-            aria-label="15×15 오목판 (격자 교차점)"
-            aria-rowcount="15"
-            aria-colcount="15"
+            aria-label="19×19 오목판 (격자 교차점)"
+            aria-rowcount="19"
+            aria-colcount="19"
           >
             <div class="board-lines" aria-hidden="true"></div>
+            <div id="board-snow" class="board-snow" aria-hidden="true" hidden></div>
+            <div id="board-stars" class="board-stars" aria-hidden="true" hidden></div>
             <div id="board-points" class="board-points"></div>
           </div>
         </main>
@@ -648,10 +1303,13 @@
     <dialog id="win-dialog" class="result-dialog" aria-labelledby="win-dialog-title">
       <div class="dialog-inner">
         <h2 id="win-dialog-title">축하합니다!</h2>
-        <p>5연속으로 승리했습니다. 훌륭한 한 판이었어요.</p>
-        <form class="dialog-actions" method="dialog">
-          <button type="submit">확인</button>
-        </form>
+        <p>5연속으로 승리했습니다. 다음 판에 잡을 돌을 고르세요.</p>
+        <div class="dialog-actions dialog-actions-win" role="group" aria-label="다음 판 돌 선택">
+          <button type="button" id="win-play-black" class="dialog-choice">다음 판 · 흑 (선공)</button>
+          <button type="button" id="win-play-white" class="dialog-choice dialog-choice-alt">
+            다음 판 · 백 (후공)
+          </button>
+        </div>
       </div>
     </dialog>
 

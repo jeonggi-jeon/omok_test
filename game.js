@@ -1,21 +1,31 @@
 /**
- * 15×15 오목: 흑(사용자) / 백(AI), 정확히 5연속만 승.
- * 돌은 격자 교차점에 둠. 흑 차례에 20초 내 미착수 시 백 차례로 넘김.
+ * 19×19 오목: 사용자 vs 컴퓨터, 정확히 5연속만 승.
+ * 돌은 격자 교차점에 둠. 사용자 차례에 20초 내 미착수 시 상대(컴퓨터) 차례로 넘김.
+ * 승리 후 대화상자에서 다음 판 흑·백 선택 가능.
+ * 컴퓨터 착수: 즉승·즉패 후 이중위협 조건부 막기, 미니맥스 깊이·후보폭 단계별 상향. 탐색 중 주기적으로 setTimeout으로 양보해 AI 20초 타이머가 막히지 않게 함. 제한 시간이 지나면 착수 없이 사용자 차례로 넘김.
+ * 후보가 많을 때 변·쪽 막수·상대 이중 위협 막수를 넣되, 정적 평가는 공격 비중을 높게 잡음.
+ * 빈 판 첫 수는 천원에 즉시 두고, 돌 1~2개 구간은 미니맥스 없이 탐욕 후보만 써서 초반 대기 시간을 줄임.
  */
 (function () {
-  const SIZE = 15;
+  const SIZE = 19;
   const EMPTY = 0;
   const BLACK = 1;
   const WHITE = 2;
   const MOVE_LIMIT_SEC = 20;
-  /** 백(AI) 착수 전 “생각” 대기(밀리초) — 랜덤으로 약간씩 달라짐 */
-  const AI_THINK_MIN_MS = 650;
-  const AI_THINK_MAX_MS = 1550;
+  /** 미니맥스가 실제 연산 시간을 쓰므로, 긴 인위 대기는 두지 않음. 화면 갱신 후 착수까지 짧은 지터만 */
+  const AI_THINK_JITTER_MIN_MS = 30;
+  const AI_THINK_JITTER_MAX_MS = 70;
+  /** 미니맥스 최대 깊이 — 초반에는 effectiveSearchDepthPlies()로 완만히 제한 */
+  const AI_SEARCH_PLIES = 5;
+  /** 한 노드 후보 상한 — 알파-베타·정렬 후 실제 노드 수는 통상 이보다 적음 */
+  const AI_MAX_BRANCH = 24;
+  const AI_EVAL_WIN = 1e12;
+  /** 미니맥스 노드마다 양보하면 과도하게 느려지므로 N회마다 setTimeout(0)으로 매크로태스크 양보 — 마이크로태스크만 쌓이면 AI 타이머 인터벌이 실행되지 않음 */
+  const MINIMAX_YIELD_EVERY = 1;
 
   const boardEl = document.getElementById("board");
   const pointsEl = document.getElementById("board-points");
   const statusEl = document.getElementById("status");
-  const lastMoveEl = document.getElementById("last-move");
   const restartEl = document.getElementById("restart");
   const winDialog = document.getElementById("win-dialog");
   const loseDialog = document.getElementById("lose-dialog");
@@ -24,21 +34,90 @@
   const timerFill = document.getElementById("timer-fill");
   const welcomeLayer = document.getElementById("welcome-layer");
   const btnStart = document.getElementById("btn-start");
+  const winPlayBlack = document.getElementById("win-play-black");
+  const winPlayWhite = document.getElementById("win-play-white");
+  const recordWinEl = document.getElementById("record-win");
+  const recordLossEl = document.getElementById("record-loss");
+  const recordDrawEl = document.getElementById("record-draw");
+  const boardShellEl = document.getElementById("board-shell");
+  const boardSnowEl = document.getElementById("board-snow");
+  const boardStarsEl = document.getElementById("board-stars");
+
+  const RECORD_STORAGE_KEY = "gomoku_player_record_v1";
+  const WIN_STREAK_STORAGE_KEY = "gomoku_win_streak_v1";
+  /** 패배 시 저장한 승리 5연 줄(정규형) — 다음 판 같은 줄 형태 번역 출현 시 막기 우선 */
+  const LOSS_LINE_PATTERNS_KEY = "gomoku_ai_loss_win_lines_v1";
+  const LOSS_LINE_PATTERNS_MAX = 16;
+  /** 사용자가 이기면 true → 다음 resetUi(다음 판)에서 판 외곽 화려 효과 1회 */
+  let victoryFrameNextMatch = false;
+  /** 다음 판에 쓸 연승 단계 효과 (1~6, 연승이 클수록 화려) */
+  let victoryTierForNextMatch = 1;
 
   /** @type {number[][]} */
   let board;
   let gameOver = false;
   /** 게임 시작 버튼을 누른 뒤에만 true */
   let matchLive = false;
-  /** 흑(사용자)이 둘 차례일 때만 true */
+  /** 사용자 돌 색 (흑 또는 백) — 백 선택 시 컴퓨터(흑)가 선공 */
+  let humanColor = BLACK;
+  /** 사용자가 둘 차례일 때만 true */
   let humanTurn = false;
   /** @type {ReturnType<typeof setInterval> | null} */
   let turnTimerId = null;
-  /** 백 차례: 1초 간격 카운트다운(흑과 동일 속도), 착수는 별도 thinkMs 타임아웃 */
   /** @type {ReturnType<typeof setInterval> | null} */
   let aiThinkTickId = null;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let aiPlaceTimeoutId = null;
+  /** AI 차례 시작 시각 — 경과 기준으로 제한 시간 표시 */
+  let aiTurnStartedAt = 0;
+  /** 미니맥스 등으로 aiMove가 겹치지 않게 */
+  let aiMoveInProgress = false;
+  /** async 미니맥스 양보용 카운터(pickAiMove 시작 시 0으로 리셋) */
+  let minimaxSearchTicks = 0;
+  /**
+   * AI 차례 제한 시간까지의 시각(epoch ms). 이후 미니맥스는 빠져 나와 정적 평가만 사용(착수는 aiMove에서 제한 시간 여부로 결정).
+   */
+  let aiSearchDeadlineMs = 0;
+  /** AI 차례 20초가 끝남(인터벌에서 설정) — 연산 중에도 플래그만 세우고, 끝나면 착수 생략 후 사용자 차례 */
+  let aiTurnClockExpired = false;
+
+  function yieldToMainThread() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  function isAiSearchOverTime() {
+    return aiSearchDeadlineMs > 0 && Date.now() >= aiSearchDeadlineMs;
+  }
+
+  /** runAiTurn에서 시작 시각을 세기 전(aiTurnStartedAt===0)에는 참이 되면 안 됨 — 그렇지 않으면 첫 AI 차례가 즉시 시간 초과 처리됨 */
+  function isAiTurnWallClockExceeded() {
+    return (
+      aiTurnStartedAt > 0 &&
+      Date.now() - aiTurnStartedAt >= MOVE_LIMIT_SEC * 1000
+    );
+  }
+
+  /** 시간 초과 시 즉석 착수용 — 미니맥스 없이 최고 탐욕 후보만 고름 */
+  function greedyFallbackPick(ai, human, branchCap) {
+    const cap = branchCap ?? AI_MAX_BRANCH;
+    const rootMoves = mergeThreatAwareRootMoves(
+      ai,
+      human,
+      orderedMoves(true, ai, human, cap),
+      cap
+    );
+    if (!rootMoves.length) return pickRandomEmpty();
+    let bestG = -Infinity;
+    let pick = /** @type {[number, number]} */ ([rootMoves[0][0], rootMoves[0][1]]);
+    for (const [r, c] of rootMoves) {
+      const g = greedyMoveScore(r, c, ai, ai, human);
+      if (g > bestG) {
+        bestG = g;
+        pick = [r, c];
+      }
+    }
+    return pick;
+  }
   /** @type {HTMLElement[]} */
   let cells;
 
@@ -161,26 +240,26 @@
     }
   }
 
+  /** 보드 위 “가장 마지막 착수” 한 점 — 링 표시용 */
   /** @type {{ r: number; c: number } | null} */
-  let lastBlackPos = null;
-  /** @type {{ r: number; c: number } | null} */
-  let lastWhitePos = null;
+  let lastStonePos = null;
 
-  function refreshPlacementSummary() {
-    const fmt = (p) => (p ? `${p.r + 1}행 ${p.c + 1}열` : "—");
-    lastMoveEl.textContent = `착수 위치 · 흑 ${fmt(lastBlackPos)} · 백 ${fmt(lastWhitePos)}`;
+  function clearLastStoneHighlight() {
+    if (lastStonePos) {
+      const el = cells[idx(lastStonePos.r, lastStonePos.c)];
+      if (el) el.classList.remove("last-stone");
+    }
+    lastStonePos = null;
   }
 
-  function recordMove(player, r, c) {
-    if (player === BLACK) lastBlackPos = { r, c };
-    else lastWhitePos = { r, c };
-    refreshPlacementSummary();
+  function setLastStoneHighlight(r, c) {
+    clearLastStoneHighlight();
+    lastStonePos = { r, c };
+    cells[idx(r, c)].classList.add("last-stone");
   }
 
   function clearPlacementHistory() {
-    lastBlackPos = null;
-    lastWhitePos = null;
-    refreshPlacementSummary();
+    clearLastStoneHighlight();
   }
 
   function stopTurnTimer() {
@@ -201,6 +280,25 @@
     }
   }
 
+  /** AI 차례 타이머 — 실제 경과 시간 기준(연산 중 메인 스레드가 멈춰도 종료 후 표시가 따라잡음) */
+  function updateAiCountdownDisplayFromElapsed() {
+    if (!timerPanel || !timerLabel || !timerFill || gameOver) return;
+    const bar = timerPanel.querySelector(".timer-bar");
+    const elapsedSec = Math.floor((Date.now() - aiTurnStartedAt) / 1000);
+    const secLeft = Math.max(0, MOVE_LIMIT_SEC - elapsedSec);
+    timerPanel.classList.remove("timer-idle");
+    timerPanel.classList.add("timer-ai");
+    timerLabel.textContent = `${secLeft}초`;
+    timerFill.style.opacity = "";
+    timerFill.style.width = `${(secLeft / MOVE_LIMIT_SEC) * 100}%`;
+    timerPanel.classList.toggle("timer-urgent", secLeft <= 5);
+    if (bar) {
+      bar.setAttribute("aria-valuenow", String(secLeft));
+      bar.setAttribute("aria-valuemax", String(MOVE_LIMIT_SEC));
+    }
+    return secLeft;
+  }
+
   function updateTimerDisplay(secondsLeft, active) {
     if (!timerPanel || !timerLabel || !timerFill) return;
     const bar = timerPanel.querySelector(".timer-bar");
@@ -209,26 +307,13 @@
       timerPanel.classList.remove("timer-urgent", "timer-ai");
       timerLabel.textContent = "—";
       timerFill.style.width = "0%";
+      timerFill.style.opacity = "";
       if (bar) bar.setAttribute("aria-valuenow", "0");
       return;
     }
     timerPanel.classList.remove("timer-idle", "timer-ai");
     timerLabel.textContent = `${secondsLeft}초`;
-    timerFill.style.width = `${(secondsLeft / MOVE_LIMIT_SEC) * 100}%`;
-    timerPanel.classList.toggle("timer-urgent", secondsLeft <= 5);
-    if (bar) {
-      bar.setAttribute("aria-valuenow", String(secondsLeft));
-      bar.setAttribute("aria-valuemax", String(MOVE_LIMIT_SEC));
-    }
-  }
-
-  /** 백 차례 타이머 — 실시간 1초마다 감소(흑과 동일). 막대 비율도 초 기준. */
-  function updateAiCountdownDisplay(secondsLeft) {
-    if (!timerPanel || !timerLabel || !timerFill || gameOver) return;
-    const bar = timerPanel.querySelector(".timer-bar");
-    timerPanel.classList.remove("timer-idle");
-    timerPanel.classList.add("timer-ai");
-    timerLabel.textContent = `${secondsLeft}초`;
+    timerFill.style.opacity = "";
     timerFill.style.width = `${(secondsLeft / MOVE_LIMIT_SEC) * 100}%`;
     timerPanel.classList.toggle("timer-urgent", secondsLeft <= 5);
     if (bar) {
@@ -262,14 +347,224 @@
     if (loseDialog && loseDialog.open) loseDialog.close();
   }
 
+  const WIN_REVEAL_OVERLAY_CLASS = "win-reveal-overlay";
+
+  function removeWinRevealOverlay() {
+    const el = boardEl && boardEl.querySelector(`.${WIN_REVEAL_OVERLAY_CLASS}`);
+    if (el) el.remove();
+  }
+
+  /**
+   * 5연속 하이라이트만 먼저 보여 주고, 판을 누르면 상태 문구·승패 대화상자 표시.
+   * @param {() => void} onContinue
+   */
+  function attachWinRevealOverlay(onContinue) {
+    removeWinRevealOverlay();
+    if (!boardEl) {
+      onContinue();
+      return;
+    }
+    const overlay = document.createElement("button");
+    overlay.type = "button";
+    overlay.className = WIN_REVEAL_OVERLAY_CLASS;
+    overlay.setAttribute(
+      "aria-label",
+      "5연속으로 끝난 위치를 확인했습니다. 눌러 결과를 표시합니다."
+    );
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      removeWinRevealOverlay();
+      onContinue();
+    };
+    overlay.addEventListener("click", finish, { once: true });
+    boardEl.appendChild(overlay);
+    queueMicrotask(() => {
+      try {
+        overlay.focus({ preventScroll: true });
+      } catch (_) {}
+    });
+  }
+
+  /**
+   * @param {string} message
+   * @param {{ congratulate?: boolean; condolences?: boolean } & Record<string, unknown>} opt
+   */
+  function showEndGameDialogs(message, opt) {
+    statusEl.textContent = message;
+    if (opt.congratulate && winDialog && typeof winDialog.showModal === "function") {
+      winDialog.showModal();
+    }
+    if (opt.condolences && loseDialog && typeof loseDialog.showModal === "function") {
+      loseDialog.showModal();
+    }
+  }
+
+  function loadPlayerRecord() {
+    try {
+      const raw = localStorage.getItem(RECORD_STORAGE_KEY);
+      if (!raw) return { wins: 0, losses: 0, draws: 0 };
+      const o = JSON.parse(raw);
+      return {
+        wins: Number(o.wins) || 0,
+        losses: Number(o.losses) || 0,
+        draws: Number(o.draws) || 0,
+      };
+    } catch {
+      return { wins: 0, losses: 0, draws: 0 };
+    }
+  }
+
+  function savePlayerRecord(rec) {
+    try {
+      localStorage.setItem(RECORD_STORAGE_KEY, JSON.stringify(rec));
+    } catch (_) {}
+  }
+
+  function refreshRecordDisplay() {
+    const r = loadPlayerRecord();
+    if (recordWinEl) recordWinEl.textContent = String(r.wins);
+    if (recordLossEl) recordLossEl.textContent = String(r.losses);
+    if (recordDrawEl) recordDrawEl.textContent = String(r.draws);
+  }
+
+  function loadWinStreak() {
+    try {
+      const v = parseInt(localStorage.getItem(WIN_STREAK_STORAGE_KEY) || "0", 10);
+      return Number.isFinite(v) && v >= 0 ? v : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function saveWinStreak(n) {
+    try {
+      localStorage.setItem(WIN_STREAK_STORAGE_KEY, String(Math.max(0, n)));
+    } catch (_) {}
+  }
+
+  function resetWinStreak() {
+    saveWinStreak(0);
+  }
+
+  /** 다음 판 보상 — 1연승만 격자 안 눈송이 */
+  const SNOW_EFFECT_TIER = 1;
+  /** 연승 2~(다음 판 단계 ≥2)에서는 별송이 */
+
+  function teardownBoardSnow() {
+    if (!boardSnowEl) return;
+    boardSnowEl.hidden = true;
+    boardSnowEl.replaceChildren();
+  }
+
+  function teardownBoardStars() {
+    if (!boardStarsEl) return;
+    boardStarsEl.hidden = true;
+    boardStarsEl.replaceChildren();
+  }
+
+  function teardownBoardCelebrationFx() {
+    teardownBoardSnow();
+    teardownBoardStars();
+  }
+
+  /**
+   * @param {number} tier 1~6 — 1연승 보상 판에서만 눈송이
+   */
+  function setupBoardSnowForStreak(tier) {
+    if (!boardSnowEl) return;
+    if (tier !== SNOW_EFFECT_TIER) {
+      teardownBoardSnow();
+      return;
+    }
+    boardSnowEl.replaceChildren();
+    const n = Math.min(42 + tier * 14, 130);
+    for (let i = 0; i < n; i++) {
+      const flake = document.createElement("span");
+      flake.className = "snowflake";
+      flake.style.setProperty("--x", String(Math.random() * 100));
+      flake.style.setProperty("--delay", `${Math.random() * 10}s`);
+      flake.style.setProperty("--dur", `${3 + Math.random() * 4}s`);
+      flake.style.setProperty("--drift", `${(Math.random() - 0.5) * 42}px`);
+      flake.style.setProperty("--size", `${2.5 + Math.random() * 6}px`);
+      boardSnowEl.appendChild(flake);
+    }
+    boardSnowEl.hidden = false;
+  }
+
+  /**
+   * @param {number} tier 2~6 — 연승 보상 판에서 화려한 별송이
+   */
+  function setupBoardStarsForStreak(tier) {
+    if (!boardStarsEl) return;
+    if (tier < 2) {
+      teardownBoardStars();
+      return;
+    }
+    boardStarsEl.replaceChildren();
+    const n = Math.min(30 + tier * 12, 130);
+    for (let i = 0; i < n; i++) {
+      const star = document.createElement("span");
+      star.className = `starfall starfall--v${1 + Math.floor(Math.random() * 3)}`;
+      star.style.setProperty("--x", String(Math.random() * 100));
+      star.style.setProperty("--delay", `${Math.random() * 12}s`);
+      star.style.setProperty("--dur", `${5.5 + Math.random() * 6}s`);
+      star.style.setProperty("--drift", `${(Math.random() - 0.5) * 56}px`);
+      star.style.setProperty("--sz", `${5 + Math.random() * 16}px`);
+      boardStarsEl.appendChild(star);
+    }
+    boardStarsEl.hidden = false;
+  }
+
+  /** @param {boolean} on @param {number} [tier] 1~6 */
+  function setBoardVictoryFrame(on, tier) {
+    if (!boardShellEl) return;
+    for (let i = 1; i <= 6; i++) {
+      boardShellEl.classList.remove(`board-wrap--victory-tier-${i}`);
+    }
+    boardShellEl.classList.toggle("board-wrap--victory-next", !!on);
+    if (on) {
+      const t = Number(tier);
+      const safe = Number.isFinite(t) ? Math.min(6, Math.max(1, Math.floor(t))) : 1;
+      boardShellEl.classList.add(`board-wrap--victory-tier-${safe}`);
+    }
+  }
+
+  /** @param {"win" | "loss" | "draw"} kind */
+  function bumpPlayerRecord(kind) {
+    const r = loadPlayerRecord();
+    if (kind === "win") r.wins += 1;
+    else if (kind === "loss") r.losses += 1;
+    else r.draws += 1;
+    savePlayerRecord(r);
+    refreshRecordDisplay();
+  }
+
   function endGame(message, options) {
+    removeWinRevealOverlay();
+    setBoardVictoryFrame(false);
     stopTurnTimer();
     stopAiThinkTimer();
     humanTurn = false;
     gameOver = true;
-    statusEl.textContent = message;
     updateTimerDisplay(0, false);
     const opt = options || {};
+    if (opt.congratulate) {
+      bumpPlayerRecord("win");
+      const nextStreak = loadWinStreak() + 1;
+      saveWinStreak(nextStreak);
+      victoryTierForNextMatch = Math.min(nextStreak, 6);
+      victoryFrameNextMatch = true;
+    } else if (opt.condolences) {
+      bumpPlayerRecord("loss");
+      resetWinStreak();
+      teardownBoardCelebrationFx();
+    } else {
+      bumpPlayerRecord("draw");
+      resetWinStreak();
+      teardownBoardCelebrationFx();
+    }
     if (
       opt.winLine &&
       typeof opt.winR === "number" &&
@@ -277,16 +572,45 @@
       (opt.winPlayer === BLACK || opt.winPlayer === WHITE)
     ) {
       highlightWinningFive(opt.winR, opt.winC, opt.winPlayer);
+      if (opt.congratulate && opt.winPlayer === humanColor) {
+        rememberAiLossWinningLine(opt.winR, opt.winC, opt.winPlayer);
+      }
     }
     for (const el of cells) {
       if (board[+el.dataset.r][+el.dataset.c] === EMPTY) el.disabled = true;
     }
-    if (opt.congratulate && winDialog && typeof winDialog.showModal === "function") {
-      winDialog.showModal();
+
+    const deferResultUI =
+      (opt.congratulate || opt.condolences) &&
+      opt.winLine &&
+      typeof opt.winR === "number" &&
+      typeof opt.winC === "number" &&
+      (opt.winPlayer === BLACK || opt.winPlayer === WHITE);
+
+    if (deferResultUI) {
+      statusEl.textContent = opt.congratulate
+        ? "5연속 위치를 확인한 뒤, 판을 눌러 주세요."
+        : "상대 5연속 위치를 확인한 뒤, 판을 눌러 주세요.";
+      attachWinRevealOverlay(() => {
+        showEndGameDialogs(message, opt);
+      });
+      return;
     }
-    if (opt.condolences && loseDialog && typeof loseDialog.showModal === "function") {
-      loseDialog.showModal();
-    }
+
+    showEndGameDialogs(message, opt);
+  }
+
+  /** 컴퓨터가 잡는 색 (사용자와 반대) */
+  function computerColor() {
+    return humanColor === BLACK ? WHITE : BLACK;
+  }
+
+  function humanColorLabel() {
+    return humanColor === BLACK ? "흑" : "백";
+  }
+
+  function computerColorLabel() {
+    return computerColor() === BLACK ? "흑" : "백";
   }
 
   function pickRandomEmpty() {
@@ -400,6 +724,219 @@
     return ok;
   }
 
+  /** @param {{ r: number; c: number }[]} cells */
+  function normalizeFiveCellPattern(cells) {
+    const minR = Math.min(...cells.map((x) => x.r));
+    const minC = Math.min(...cells.map((x) => x.c));
+    return cells.map(({ r, c }) => ({ r: r - minR, c: c - minC }));
+  }
+
+  /** @param {{ r: number; c: number }[]} norm */
+  function lossPatternKey(norm) {
+    const sorted = [...norm].sort((a, b) => a.r - b.r || a.c - b.c);
+    return sorted.map((p) => `${p.r},${p.c}`).join(";");
+  }
+
+  /** 가로·세로·대각 직선 5칸을 동일하게 취급하기 위해 90° 회전 정규형을 모두 펼침 */
+  function enumerateFiveLineRotationNorms(norm0) {
+    /** @type {{ r: number; c: number }[][]} */
+    const out = [];
+    const keys = new Set();
+    let cur = normalizeFiveCellPattern(norm0.map((p) => ({ ...p })));
+    for (let i = 0; i < 4; i++) {
+      const k = lossPatternKey(cur);
+      if (!keys.has(k)) {
+        keys.add(k);
+        out.push(cur.map((p) => ({ ...p })));
+      }
+      cur = normalizeFiveCellPattern(cur.map(({ r, c }) => ({ r: -c, c: r })));
+    }
+    return out;
+  }
+
+  function loadLossLinePatterns() {
+    try {
+      const raw = localStorage.getItem(LOSS_LINE_PATTERNS_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr)
+        ? arr.filter((x) => x && typeof x.key === "string" && Array.isArray(x.norm))
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveLossLinePatterns(list) {
+    try {
+      localStorage.setItem(LOSS_LINE_PATTERNS_KEY, JSON.stringify(list.slice(0, LOSS_LINE_PATTERNS_MAX)));
+    } catch (_) {}
+  }
+
+  /** 사용자(흑/백)가 이긴 직후 판에 남은 5연 줄을 정규형으로 저장 (회전 동형 모두 등록해 다음 판 매칭률↑) */
+  function rememberAiLossWinningLine(winR, winC, winner) {
+    const cells = collectWinningFive(winR, winC, winner);
+    if (cells.length !== 5) return;
+    const norm = normalizeFiveCellPattern(cells);
+    const variants = enumerateFiveLineRotationNorms(norm);
+    let list = loadLossLinePatterns();
+    const existingKeys = new Set(list.map((x) => x.key));
+    let anyNew = false;
+    for (const v of variants) {
+      const key = lossPatternKey(v);
+      if (existingKeys.has(key)) continue;
+      existingKeys.add(key);
+      list.unshift({ key, norm: v });
+      anyNew = true;
+    }
+    if (!anyNew) return;
+    if (list.length > LOSS_LINE_PATTERNS_MAX) list.length = LOSS_LINE_PATTERNS_MAX;
+    saveLossLinePatterns(list);
+  }
+
+  /**
+   * 저장된 패배 5칸 줄이 판 위에 번역·부분 재현될 때, 그 줄 위 빈 칸 중
+   * 상대가 두면 즉승이거나 3·3(이중 위협)이 되는 막점을 고른다.
+   * (이전에는 4연+빈1만 봐서 3·3 패배를 같은 줄 형태로 반복할 수 있었음.)
+   */
+  function findLossMemorizedLineBlock(human) {
+    const patterns = loadLossLinePatterns();
+    if (!patterns.length) return null;
+
+    /** @type {[number, number] | null} */
+    let bestThreatBlock = null;
+    let bestThreatEv = -1;
+
+    for (const { norm } of patterns) {
+      if (!norm || norm.length !== 5) continue;
+      const maxOfsR = Math.max(...norm.map((p) => p.r));
+      const maxOfsC = Math.max(...norm.map((p) => p.c));
+      for (let dr = -maxOfsR; dr + maxOfsR < SIZE; dr++) {
+        for (let dc = -maxOfsC; dc + maxOfsC < SIZE; dc++) {
+          let humanCt = 0;
+          /** @type {[number, number][]} */
+          const empties = [];
+          let illegal = false;
+          for (const p of norm) {
+            const r = dr + p.r;
+            const c = dc + p.c;
+            if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) {
+              illegal = true;
+              break;
+            }
+            const v = board[r][c];
+            if (v === human) humanCt++;
+            else if (v === EMPTY) empties.push([r, c]);
+            else illegal = true;
+          }
+          if (illegal || !empties.length) continue;
+          /* 완전히 빈 5칸만 겹치면 오탐 방지: 그 줄에 상대 돌이 하나도 없으면 스킵 */
+          if (humanCt === 0) continue;
+
+          for (const [er, ec] of empties) {
+            if (winsIfPlays(er, ec, human)) {
+              return [er, ec];
+            }
+            if (humanMoveFormsDoubleThreat(er, ec, human)) {
+              const ev = evaluateHypothetical(er, ec, human);
+              if (ev > bestThreatEv) {
+                bestThreatEv = ev;
+                bestThreatBlock = [er, ec];
+              }
+            }
+          }
+        }
+      }
+    }
+    return bestThreatBlock;
+  }
+
+  /**
+   * 상대가 이 칸에 두면 이중 위협(3·3·4·3·막세 조합 등)인지.
+   * 축 최댓값 페어로 4·3을 잡고, 기존 카운트로 나머지 분기를 덮음.
+   */
+  function humanMoveFormsDoubleThreat(r, c, human) {
+    if (board[r][c] !== EMPTY) return false;
+    const total = evaluateHypothetical(r, c, human);
+
+    board[r][c] = human;
+    /** @type {number[]} */
+    const axisScores = [];
+    let openThreeAxes = 0;
+    let rushThreeAxes = 0;
+    let rushFourAxes = 0;
+    let openFourAxes = 0;
+    for (const [dr, dc] of DIRS) {
+      const sc = axisScore(axisAfterMove(r, c, dr, dc, human));
+      axisScores.push(sc);
+      if (sc >= SC.OPEN_THREE) openThreeAxes++;
+      if (sc >= SC.RUSH_THREE) rushThreeAxes++;
+      if (sc >= SC.RUSH_FOUR) rushFourAxes++;
+      if (sc >= SC.OPEN_FOUR) openFourAxes++;
+    }
+    board[r][c] = EMPTY;
+
+    axisScores.sort((a, b) => b - a);
+    const h0 = axisScores[0];
+    const h1 = axisScores[1];
+    const h2 = axisScores[2];
+
+    /* 상위 두 축이 모두 열삼 이상 → 3·3 */
+    if (h0 >= SC.OPEN_THREE && h1 >= SC.OPEN_THREE) return true;
+    /* 막세/열사 + 열삼 → 4·3 계열 (한 수에 수비 불가 분기) */
+    if (h0 >= SC.RUSH_FOUR && h1 >= SC.OPEN_THREE) return true;
+    if (h0 >= SC.OPEN_FOUR && h1 >= SC.RUSH_THREE) return true;
+    if (openFourAxes >= 1 && openThreeAxes >= 1) return true;
+    /* 막세 두 줄 + 열삼 한 줄 */
+    if (rushThreeAxes >= 2 && openThreeAxes >= 1) return true;
+
+    if (openThreeAxes >= 2) return true;
+    if (openThreeAxes >= 1 && rushThreeAxes >= 2) return true;
+    if (rushFourAxes >= 1 && rushThreeAxes >= 2) return true;
+    /* 한 축 열삼 + 한 축 막세 이상: 합계도 같이 높을 때만 (과막 방지) */
+    if (openThreeAxes >= 1 && rushThreeAxes >= 1 && total >= SC.OPEN_THREE + SC.RUSH_THREE - 800) {
+      return true;
+    }
+    /* 상위 세 축이 모두 막세 이상이면 약한 3·3·포크에 근접 */
+    if (h0 >= SC.RUSH_THREE && h1 >= SC.RUSH_THREE && h2 >= SC.RUSH_THREE && openThreeAxes >= 1) {
+      return true;
+    }
+    if (total >= SC.OPEN_THREE * 2 + SC.RUSH_THREE) return true;
+    if (total >= SC.OPEN_THREE + SC.RUSH_THREE * 2) return true;
+    return false;
+  }
+
+  /** 빈 칸 중 내 패턴 합 최대 — 공격 우선 판단용 */
+  function maxEvaluateHypotheticalForPlayer(player) {
+    let best = -Infinity;
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) continue;
+        const v = evaluateHypothetical(r, c, player);
+        if (v > best) best = v;
+      }
+    }
+    return best;
+  }
+
+  /** 상대 이중 위협을 막아야 할 칸 중, 상대에게 가장 유리한(막아야 하는) 한 점 */
+  function findHumanDoubleThreatBlockMove(human) {
+    let bestRc = /** @type {[number, number] | null} */ (null);
+    let bestEv = -1;
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) continue;
+        if (!humanMoveFormsDoubleThreat(r, c, human)) continue;
+        const ev = evaluateHypothetical(r, c, human);
+        if (ev > bestEv) {
+          bestEv = ev;
+          bestRc = [r, c];
+        }
+      }
+    }
+    return bestRc;
+  }
+
   function nearestStoneDist(r, c) {
     let best = 99;
     for (let rr = 0; rr < SIZE; rr++) {
@@ -473,48 +1010,319 @@
     return out;
   }
 
-  function pickAiMove() {
+  /** 정적 평가·후보 정렬 — 탐색이 깊어질수록 평가 구분력이 중요 */
+  const HEU = {
+    ATT: 2.3,
+    DEF: 0.58,
+    EXT: 280,
+  };
+
+  /** 상대가 이 칸에 두면 패턴 점수가 이 정도면 루트 탐색에 반드시 넣음 (미니맥스 후보 누락 방지) */
+  /* 두 열삼이면 합이 대략 2×OPEN_THREE 근처라, 3×으로 두면 3·3 막점이 후보에서 빠졌음 */
+  const ROOT_HUMAN_THREAT_MERGE = SC.OPEN_THREE * 2 - 2000;
+
+  /** AI 관점(높을수록 AI 유리) 정적 평가: 주변 후보 칸 휴리스틱 합 */
+  function evaluateStaticPosition(ai, human) {
+    const cands = collectCandidates();
+    let sum = 0;
+    for (const [r, c] of cands) {
+      if (board[r][c] !== EMPTY) continue;
+      const a = evaluateHypothetical(r, c, ai);
+      const d = evaluateHypothetical(r, c, human);
+      let s = a * HEU.ATT + d * HEU.DEF;
+      s += adjacentFriendlyCount(r, c, ai) * HEU.EXT;
+      const nd = nearestStoneDist(r, c);
+      if (nd < 99) s += (4 - Math.min(nd, 4)) * SC.NEIGHBOR_BONUS;
+      sum += s;
+    }
+    return sum;
+  }
+
+  /** 되는 쪽이 두는 수 기준 단일 수 점수 — 정렬용 */
+  function greedyMoveScore(r, c, mover, ai, human) {
+    const opp = mover === ai ? human : ai;
+    const attack = evaluateHypothetical(r, c, mover);
+    const defense = evaluateHypothetical(r, c, opp);
+    let s = attack * HEU.ATT + defense * HEU.DEF;
+    s += adjacentFriendlyCount(r, c, mover) * HEU.EXT;
+    const nd = nearestStoneDist(r, c);
+    if (nd < 99) s += (4 - Math.min(nd, 4)) * SC.NEIGHBOR_BONUS;
+    /* AI 차례: 공격 패턴 후보가 정렬·루트 상단으로 오도록 가산 */
+    if (mover === ai) {
+      if (attack >= SC.RUSH_FOUR) {
+        s += attack * 0.045;
+      } else if (attack >= SC.OPEN_THREE) {
+        s += attack * 0.028;
+      } else if (attack >= SC.RUSH_THREE) {
+        s += attack * 0.014;
+      } else if (attack >= SC.OPEN_TWO) {
+        s += attack * 0.005;
+      }
+    }
+    return s;
+  }
+
+  /** 탐색 후보 — 중앙만 남기면 변·모서리의 필수 막수가 제외되어 동일 패턴으로 자주 패배함 */
+  function collectCandidatesForSearch() {
+    return collectCandidates().filter(([r, c]) => board[r][c] === EMPTY);
+  }
+
+  function boardStoneCount() {
+    let n = 0;
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) n++;
+      }
+    }
+    return n;
+  }
+
+  /** 초반은 후보 좁혀 속도 유지, 중반 이후는 상한(AI_SEARCH_PLIES)까지 읽기 */
+  function effectiveSearchDepthPlies() {
+    const n = boardStoneCount();
+    if (n <= 6) return 3;
+    if (n >= 40) return 2;
+    return 3;
+  }
+
+  function effectiveMaxBranch() {
+    const n = boardStoneCount();
+    if (n <= 6) return 12;
+    if (n >= 40) return 12;
+    return 14;
+  }
+
+  /**
+   * 루트 착수 후보에 ‘상대가 두기 좋은 강한 칸’을 꼭 넣고 다시 정렬해 상한만 자름.
+   * @param {number} ai
+   * @param {number} human
+   * @param {[number, number][]} baseMoves
+   * @param {number} [branchCap]
+   */
+  function mergeThreatAwareRootMoves(ai, human, baseMoves, branchCap) {
+    const seen = new Set(baseMoves.map(([r, c]) => r * SIZE + c));
+    const extras = [];
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) continue;
+        const key = r * SIZE + c;
+        if (seen.has(key)) continue;
+        const humScore = evaluateHypothetical(r, c, human);
+        if (
+          humScore >= ROOT_HUMAN_THREAT_MERGE ||
+          winsIfPlays(r, c, human) ||
+          humanMoveFormsDoubleThreat(r, c, human)
+        ) {
+          extras.push([r, c]);
+          seen.add(key);
+        }
+      }
+    }
+    if (!extras.length) return baseMoves;
+    const merged = [...extras, ...baseMoves];
+    const scored = merged.map(([r, c]) => ({
+      r,
+      c,
+      s: greedyMoveScore(r, c, ai, ai, human),
+    }));
+    scored.sort((a, b) => b.s - a.s);
+    const out = [];
+    const cap = branchCap ?? AI_MAX_BRANCH;
+    for (let i = 0; i < scored.length && i < cap; i++) {
+      out.push([scored[i].r, scored[i].c]);
+    }
+    return out;
+  }
+
+  /**
+   * @param {boolean} forMax - true: AI 차례(큰 수부터), false: 사용자 차례(강한 응수부터)
+   */
+  function orderedMoves(forMax, ai, human, maxBranch) {
+    const cap = maxBranch ?? AI_MAX_BRANCH;
+    const mover = forMax ? ai : human;
+    const raw = collectCandidatesForSearch();
+    const scored = [];
+    for (const [r, c] of raw) {
+      if (board[r][c] !== EMPTY) continue;
+      scored.push({ r, c, s: greedyMoveScore(r, c, mover, ai, human) });
+    }
+    scored.sort((a, b) => b.s - a.s);
+    const out = [];
+    for (let i = 0; i < scored.length && i < cap; i++) {
+      out.push([scored[i].r, scored[i].c]);
+    }
+    return out;
+  }
+
+  /**
+   * 미니맥스 + 알파-베타. aiToMove: 이번에 둘 색이 AI이면 true.
+   * 반환: AI 관점 점수(클수록 AI 유리).
+   * 주기적으로 await로 양보해 타이머 등 UI가 멈추지 않게 함.
+   */
+  async function minimax(depth, aiToMove, alpha, beta, ai, human, maxBranch) {
+    minimaxSearchTicks++;
+    if (minimaxSearchTicks % MINIMAX_YIELD_EVERY === 0) {
+      await yieldToMainThread();
+    }
+
+    if (isAiSearchOverTime()) {
+      return evaluateStaticPosition(ai, human);
+    }
+
+    if (depth === 0) return evaluateStaticPosition(ai, human);
+
+    const branch = maxBranch ?? AI_MAX_BRANCH;
+    const moves = orderedMoves(aiToMove, ai, human, branch);
+    if (!moves.length) return evaluateStaticPosition(ai, human);
+
+    if (aiToMove) {
+      let best = -AI_EVAL_WIN;
+      for (const [r, c] of moves) {
+        if (isAiSearchOverTime()) {
+          return evaluateStaticPosition(ai, human);
+        }
+        if (board[r][c] !== EMPTY) continue;
+        board[r][c] = ai;
+        let v;
+        if (isExactFiveWin(r, c, ai)) {
+          v = AI_EVAL_WIN;
+        } else {
+          v = await minimax(depth - 1, false, alpha, beta, ai, human, branch);
+        }
+        board[r][c] = EMPTY;
+        best = Math.max(best, v);
+        alpha = Math.max(alpha, best);
+        if (beta <= alpha) break;
+      }
+      return best;
+    }
+
+    let best = AI_EVAL_WIN;
+    for (const [r, c] of moves) {
+      if (isAiSearchOverTime()) {
+        return evaluateStaticPosition(ai, human);
+      }
+      if (board[r][c] !== EMPTY) continue;
+      board[r][c] = human;
+      let v;
+      if (isExactFiveWin(r, c, human)) {
+        v = -AI_EVAL_WIN;
+      } else {
+        v = await minimax(depth - 1, true, alpha, beta, ai, human, branch);
+      }
+      board[r][c] = EMPTY;
+      best = Math.min(best, v);
+      beta = Math.min(beta, best);
+      if (beta <= alpha) break;
+    }
+    return best;
+  }
+
+  async function pickAiMove() {
     const candidates = collectCandidates();
     if (!candidates.length) return null;
 
-    let best = -Infinity;
-    let picks = [];
-
-    for (const [r, c] of candidates) {
-      if (board[r][c] !== EMPTY) continue;
-      if (winsIfPlays(r, c, WHITE)) return [r, c];
-    }
-
-    for (const [r, c] of candidates) {
-      if (board[r][c] !== EMPTY) continue;
-      if (winsIfPlays(r, c, BLACK)) return [r, c];
-    }
-
+    const ai = computerColor();
+    const human = humanColor;
     const center = (SIZE - 1) / 2;
-    /** 공격 위주: 백 자신 패턴은 강하게, 흑 방어는 약하게 반영 */
-    const ATT_WEIGHT = 1.42;
-    const DEF_WEIGHT = 0.84;
-    /** 내 돌 옆을 우선 — 적극적으로 모양 붙이기 */
-    const EXTEND_BONUS = 165;
 
-    for (const [r, c] of candidates) {
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) continue;
+        if (winsIfPlays(r, c, ai)) return [r, c];
+      }
+    }
+
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) continue;
+        if (winsIfPlays(r, c, human)) return [r, c];
+      }
+    }
+
+    /* 지난 패에서 진 줄·3·3 형태 재현 시, 공격보다 우선 막음 (동일 패턴 반복 패배 방지) */
+    const lossMemBlock = findLossMemorizedLineBlock(human);
+    if (lossMemBlock) {
+      return lossMemBlock;
+    }
+
+    const blockDouble = findHumanDoubleThreatBlockMove(human);
+    /*
+     * 3·3·4·3 등은 한 수로 막아야 하므로, AI가 막 세(열사)를 노리고 있어도 이중위협 막기를 우선함.
+     * 즉승은 위에서 이미 처리됨.
+     */
+    if (blockDouble) {
+      return blockDouble;
+    }
+
+    const stones = boardStoneCount();
+    /* 빈 판: 후보 361칸×미니맥스로 수 초 걸림 → 천원 즉시 */
+    if (stones === 0) {
+      const c = (SIZE - 1) >> 1;
+      return [c, c];
+    }
+    /* 초반 3수: 미니맥스 대신 탐욕만(후보 영역도 작음) */
+    if (stones <= 4) {
+      const branchCap = effectiveMaxBranch();
+      return greedyFallbackPick(ai, human, branchCap);
+    }
+
+    const branchCap = effectiveMaxBranch();
+    const depthPlies = effectiveSearchDepthPlies();
+    const rootMoves = mergeThreatAwareRootMoves(
+      ai,
+      human,
+      orderedMoves(true, ai, human, branchCap),
+      branchCap
+    );
+    if (!rootMoves.length) return pickRandomEmpty();
+
+    minimaxSearchTicks = 0;
+
+    let bestVal = -Infinity;
+    let picks = [];
+    const maxRootEvals = Math.min(rootMoves.length, 8);
+
+    for (let idx = 0; idx < maxRootEvals; idx++) {
+      if (isAiSearchOverTime()) {
+        break;
+      }
+      const [r, c] = rootMoves[idx];
+      await yieldToMainThread();
       if (board[r][c] !== EMPTY) continue;
-      const attack = evaluateHypothetical(r, c, WHITE);
-      const defense = evaluateHypothetical(r, c, BLACK);
-      let score = attack * ATT_WEIGHT + defense * DEF_WEIGHT;
-      score += adjacentFriendlyCount(r, c, WHITE) * EXTEND_BONUS;
-      const nd = nearestStoneDist(r, c);
-      if (nd < 99) score += (4 - Math.min(nd, 4)) * SC.NEIGHBOR_BONUS;
+      board[r][c] = ai;
+      let v;
+      if (isExactFiveWin(r, c, ai)) {
+        board[r][c] = EMPTY;
+        return [r, c];
+      }
+      v = await minimax(
+        depthPlies - 1,
+        false,
+        -AI_EVAL_WIN,
+        AI_EVAL_WIN,
+        ai,
+        human,
+        branchCap
+      );
+      board[r][c] = EMPTY;
 
-      if (score > best) {
-        best = score;
+      if (v > bestVal) {
+        bestVal = v;
         picks = [[r, c]];
-      } else if (score === best) {
+      } else if (v === bestVal) {
         picks.push([r, c]);
       }
     }
 
+    if (!picks.length) {
+      return greedyFallbackPick(ai, human, branchCap);
+    }
+
     picks.sort((a, b) => {
+      const ga = greedyMoveScore(a[0], a[1], ai, ai, human);
+      const gb = greedyMoveScore(b[0], b[1], ai, ai, human);
+      if (gb !== ga) return gb - ga;
       const da = Math.abs(a[0] - center) + Math.abs(a[1] - center);
       const db = Math.abs(b[0] - center) + Math.abs(b[1] - center);
       if (da !== db) return da - db;
@@ -524,76 +1332,113 @@
     return picks[0] || null;
   }
 
-  function aiMove() {
-    const pick = pickAiMove() || pickRandomEmpty();
-    if (!pick) {
-      endGame("무승부 (판 가득 참)");
-      return;
+  async function aiMove() {
+    if (!matchLive || gameOver || aiMoveInProgress) return;
+    aiMoveInProgress = true;
+    try {
+      const rawPick = await pickAiMove();
+      /** 미니맥스 등 동기 연산 후 남은 시간 표시 맞춤 */
+      updateAiCountdownDisplayFromElapsed();
+      stopAiThinkTimer();
+
+      const aiOverTime = aiTurnClockExpired || isAiTurnWallClockExceeded();
+
+      if (aiOverTime) {
+        statusEl.textContent = `컴퓨터 연산 시간 초과 — 당신의 차례입니다 (${humanColorLabel()})`;
+        humanTurn = true;
+        for (const el of cells) {
+          if (board[+el.dataset.r][+el.dataset.c] === EMPTY) el.disabled = false;
+        }
+        startTurnTimer();
+        return;
+      }
+
+      const pick = rawPick ?? pickRandomEmpty();
+
+      if (!pick) {
+        endGame("무승부 (판 가득 참)");
+        return;
+      }
+      const [r, c] = pick;
+      const ai = computerColor();
+      board[r][c] = ai;
+      paintCell(r, c);
+      setLastStoneHighlight(r, c);
+      if (isExactFiveWin(r, c, ai)) {
+        const w = computerColorLabel();
+        endGame(`패배했습니다 (${w}이 5연속).`, {
+          condolences: true,
+          winLine: true,
+          winR: r,
+          winC: c,
+          winPlayer: ai,
+        });
+        return;
+      }
+      if (!pickRandomEmpty()) {
+        endGame("무승부 (판 가득 참)");
+        return;
+      }
+      statusEl.textContent = `당신의 차례입니다 (${humanColorLabel()})`;
+      humanTurn = true;
+      for (const el of cells) {
+        if (board[+el.dataset.r][+el.dataset.c] === EMPTY) el.disabled = false;
+      }
+      startTurnTimer();
+    } finally {
+      aiMoveInProgress = false;
+      aiSearchDeadlineMs = 0;
+      aiTurnClockExpired = false;
     }
-    const [r, c] = pick;
-    board[r][c] = WHITE;
-    paintCell(r, c);
-    recordMove(WHITE, r, c);
-    if (isExactFiveWin(r, c, WHITE)) {
-      endGame("패배했습니다 (백이 5연속).", {
-        condolences: true,
-        winLine: true,
-        winR: r,
-        winC: c,
-        winPlayer: WHITE,
-      });
-      return;
-    }
-    if (!pickRandomEmpty()) {
-      endGame("무승부 (판 가득 참)");
-      return;
-    }
-    statusEl.textContent = "당신의 차례입니다 (흑)";
-    humanTurn = true;
-    for (const el of cells) {
-      if (board[+el.dataset.r][+el.dataset.c] === EMPTY) el.disabled = false;
-    }
-    startTurnTimer();
   }
 
+  /**
+   * AI 차례: 사용자와 동일하게 20초 제한 시간이 줄어듦(경과 시간 기준).
+   * 짧은 지연 뒤 착수 계산 — 그전에도 인터벌로 막대가 갱신됨.
+   */
   function runAiTurn() {
     stopTurnTimer();
     stopAiThinkTimer();
-    statusEl.textContent = "컴퓨터(백)가 생각하는 중…";
+    aiTurnClockExpired = false;
+    aiTurnStartedAt = Date.now();
+    aiSearchDeadlineMs = aiTurnStartedAt + MOVE_LIMIT_SEC * 1000 - 80;
+
+    statusEl.textContent = `컴퓨터(${computerColorLabel()})가 두는 중…`;
     for (const el of cells) {
       if (board[+el.dataset.r][+el.dataset.c] === EMPTY) el.disabled = true;
     }
-    const thinkMs =
-      AI_THINK_MIN_MS + Math.random() * (AI_THINK_MAX_MS - AI_THINK_MIN_MS);
 
-    let sec = MOVE_LIMIT_SEC;
-    updateAiCountdownDisplay(sec);
-
-    aiThinkTickId = setInterval(() => {
+    updateAiCountdownDisplayFromElapsed();
+    aiThinkTickId = window.setInterval(() => {
       if (gameOver) {
         stopAiThinkTimer();
-        updateTimerDisplay(0, false);
         return;
       }
-      sec -= 1;
-      if (sec <= 0) {
+      const left = updateAiCountdownDisplayFromElapsed();
+      if (left <= 0) {
+        aiTurnClockExpired = true;
+        aiSearchDeadlineMs = Date.now();
         stopAiThinkTimer();
-        updateAiCountdownDisplay(0);
-        if (!gameOver) aiMove();
-        return;
+        if (aiPlaceTimeoutId !== null) {
+          clearTimeout(aiPlaceTimeoutId);
+          aiPlaceTimeoutId = null;
+        }
       }
-      updateAiCountdownDisplay(sec);
-    }, 1000);
+    }, 100);
 
-    aiPlaceTimeoutId = setTimeout(() => {
-      aiPlaceTimeoutId = null;
-      if (gameOver) return;
-      if (aiThinkTickId !== null) {
-        clearInterval(aiThinkTickId);
-        aiThinkTickId = null;
-      }
-      if (!gameOver) aiMove();
-    }, thinkMs);
+    const jitter =
+      AI_THINK_JITTER_MIN_MS +
+      Math.random() * (AI_THINK_JITTER_MAX_MS - AI_THINK_JITTER_MIN_MS);
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        aiPlaceTimeoutId = window.setTimeout(() => {
+          aiPlaceTimeoutId = null;
+          if (gameOver) return;
+          aiMove().catch((err) => console.error("AI move error:", err));
+        }, jitter);
+      });
+    });
   }
 
   function onTurnTimeout() {
@@ -602,7 +1447,10 @@
     stopTurnTimer();
     stopAiThinkTimer();
     updateTimerDisplay(0, false);
-    statusEl.textContent = "시간 초과 — 흑 착수 없음, 백이 둡니다.";
+    statusEl.textContent =
+      humanColor === BLACK
+        ? "시간 초과 — 흑 착수 없음, 백이 둡니다."
+        : "시간 초과 — 백 착수 없음, 흑이 둡니다.";
     runAiTurn();
   }
 
@@ -619,17 +1467,17 @@
     stopAiThinkTimer();
     updateTimerDisplay(0, false);
 
-    board[r][c] = BLACK;
+    board[r][c] = humanColor;
     paintCell(r, c);
-    recordMove(BLACK, r, c);
+    setLastStoneHighlight(r, c);
 
-    if (isExactFiveWin(r, c, BLACK)) {
-      endGame("승리! 흑 5연속입니다.", {
+    if (isExactFiveWin(r, c, humanColor)) {
+      endGame(`승리! ${humanColorLabel()} 5연속입니다.`, {
         congratulate: true,
         winLine: true,
         winR: r,
         winC: c,
-        winPlayer: BLACK,
+        winPlayer: humanColor,
       });
       return;
     }
@@ -643,6 +1491,7 @@
   }
 
   function resetUi() {
+    removeWinRevealOverlay();
     closeAllDialogs();
     stopTurnTimer();
     stopAiThinkTimer();
@@ -651,19 +1500,54 @@
     if (welcomeLayer) welcomeLayer.hidden = true;
     buildGrid();
     clearPlacementHistory();
-    statusEl.textContent = "당신의 차례입니다 (흑)";
-    humanTurn = true;
     if (restartEl) restartEl.disabled = false;
-    startTurnTimer();
+
+    if (victoryFrameNextMatch) {
+      const tier = victoryTierForNextMatch;
+      setBoardVictoryFrame(true, tier);
+      victoryFrameNextMatch = false;
+      if (tier >= 2) {
+        teardownBoardSnow();
+        setupBoardStarsForStreak(tier);
+      } else {
+        teardownBoardStars();
+        setupBoardSnowForStreak(tier);
+      }
+    } else {
+      setBoardVictoryFrame(false);
+      teardownBoardCelebrationFx();
+    }
+
+    if (humanColor === BLACK) {
+      statusEl.textContent = "당신의 차례입니다 (흑)";
+      humanTurn = true;
+      for (const el of cells) {
+        if (board[+el.dataset.r][+el.dataset.c] === EMPTY) el.disabled = false;
+      }
+      startTurnTimer();
+    } else {
+      humanTurn = false;
+      statusEl.textContent = `컴퓨터(${computerColorLabel()})가 선공입니다…`;
+      for (const el of cells) {
+        if (board[+el.dataset.r][+el.dataset.c] === EMPTY) el.disabled = true;
+      }
+      updateTimerDisplay(0, false);
+      runAiTurn();
+    }
   }
 
   function initPreGame() {
+    removeWinRevealOverlay();
     closeAllDialogs();
     stopTurnTimer();
     stopAiThinkTimer();
     matchLive = false;
     humanTurn = false;
+    humanColor = BLACK;
     gameOver = false;
+    victoryFrameNextMatch = false;
+    setBoardVictoryFrame(false);
+    teardownBoardCelebrationFx();
     buildGrid();
     clearPlacementHistory();
     statusEl.textContent = "게임 시작 버튼을 눌러 주세요.";
@@ -675,8 +1559,33 @@
   }
 
   pointsEl.addEventListener("click", onBoardClick);
-  restartEl.addEventListener("click", resetUi);
-  if (btnStart) btnStart.addEventListener("click", resetUi);
+  restartEl.addEventListener("click", () => {
+    humanColor = BLACK;
+    /** 직전 판 승리 시 `endGame`에서 켠 `victoryFrameNextMatch`를 유지 → 다음 `resetUi`에서 바둑판 보상 효과 1회 */
+    resetWinStreak();
+    resetUi();
+  });
+  if (btnStart)
+    btnStart.addEventListener("click", () => {
+      humanColor = BLACK;
+      victoryFrameNextMatch = false;
+      resetWinStreak();
+      resetUi();
+    });
 
+  if (winPlayBlack)
+    winPlayBlack.addEventListener("click", () => {
+      humanColor = BLACK;
+      if (winDialog && winDialog.open) winDialog.close();
+      resetUi();
+    });
+  if (winPlayWhite)
+    winPlayWhite.addEventListener("click", () => {
+      humanColor = WHITE;
+      if (winDialog && winDialog.open) winDialog.close();
+      resetUi();
+    });
+
+  refreshRecordDisplay();
   initPreGame();
 })();
