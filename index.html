@@ -98,19 +98,30 @@
       }
 
       @media (hover: none) and (pointer: coarse) {
+        /*
+         * 100dvh / inset:0(위·아·오·하 전부 0)은 모바일에서 주소창이 사라질 때마다
+         * “레이아웃 뷰포트” 높이를 따라 늘어나 떨리는 느낌이 난다.
+         * 100svh(스몰 뷰포트) + 명시 height로 브라우저 UI 토글과 떨어져 안정시킨다.
+         */
         html {
           height: 100%;
-          height: 100dvh;
+          min-height: 100vh;
+          min-height: 100svh;
           overflow: hidden;
         }
 
         body {
           position: fixed;
-          inset: 0;
+          top: 0;
+          left: 0;
+          right: 0;
           width: 100%;
           max-width: 100%;
+          height: 100vh;
+          height: 100svh;
+          max-height: 100vh;
+          max-height: 100svh;
           min-height: 0;
-          max-height: 100dvh;
           padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));
           padding-left: max(0.5rem, env(safe-area-inset-left, 0px));
           padding-right: max(0.5rem, env(safe-area-inset-right, 0px));
