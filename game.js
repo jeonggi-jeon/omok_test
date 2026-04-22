@@ -854,6 +854,7 @@
   /**
    * 상대가 이 칸에 두면 이중 위협(3·3·4·3·막세 조합 등)인지.
    * 축 최댓값 페어로 4·3을 잡고, 기존 카운트로 나머지 분기를 덮음.
+   * 4-4, 3-4, 4-3 패턴 감지 강화
    */
   function humanMoveFormsDoubleThreat(r, c, human) {
     if (board[r][c] !== EMPTY) return false;
@@ -880,6 +881,11 @@
     const h0 = axisScores[0];
     const h1 = axisScores[1];
     const h2 = axisScores[2];
+
+    /* 4-4: 열사 두 줄 (가장 위험) */
+    if (openFourAxes >= 2) return true;
+    /* 4-4: 막세 두 줄도 2수로 막기 불가 */
+    if (rushFourAxes >= 2) return true;
 
     /* 상위 두 축이 모두 열삼 이상 → 3·3 */
     if (h0 >= SC.OPEN_THREE && h1 >= SC.OPEN_THREE) return true;
@@ -919,17 +925,125 @@
     return best;
   }
 
-  /** 상대 이중 위협을 막아야 할 칸 중, 상대에게 가장 유리한(막아야 하는) 한 점 */
+  /** AI가 이 칸에 두면 다음 수에 이길 수 있는지 확인 (2수 이내 승리 경로) */
+  function canWinInTwoMoves(r, c, ai) {
+    if (board[r][c] !== EMPTY) return false;
+    board[r][c] = ai;
+    let canWin = false;
+
+    /* 현재 수로 이기는지 확인 */
+    if (isExactFiveWin(r, c, ai)) {
+      board[r][c] = EMPTY;
+      return true;
+    }
+
+    /* 다음 AI 수로 이길 수 있는지 확인 */
+    for (let rr = 0; rr < SIZE; rr++) {
+      for (let cc = 0; cc < SIZE; cc++) {
+        if (board[rr][cc] !== EMPTY) continue;
+        board[rr][cc] = ai;
+        if (isExactFiveWin(rr, cc, ai)) {
+          canWin = true;
+        }
+        board[rr][cc] = EMPTY;
+        if (canWin) break;
+      }
+      if (canWin) break;
+    }
+
+    board[r][c] = EMPTY;
+    return canWin;
+  }
+
+  /** AI가 양쪽 끝이 비어있는 3연(열삼)을 만들 수 있는 수 찾기 */
+  function findAiOpenThreeMove(ai, human) {
+    let bestMoves = [];
+    let bestScore = -Infinity;
+
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) continue;
+        const score = evaluateHypothetical(r, c, ai);
+
+        /* 열삼 이상이면 후보에 추가 */
+        if (score >= SC.OPEN_THREE) {
+          board[r][c] = ai;
+          let hasOpenThree = false;
+          for (const [dr, dc] of DIRS) {
+            const ax = axisAfterMove(r, c, dr, dc, ai);
+            if (ax.total === 3 && ax.capA === EMPTY && ax.capB === EMPTY) {
+              hasOpenThree = true;
+              break;
+            }
+          }
+          board[r][c] = EMPTY;
+
+          if (hasOpenThree) {
+            if (score > bestScore) {
+              bestScore = score;
+              bestMoves = [[r, c]];
+            } else if (score === bestScore) {
+              bestMoves.push([r, c]);
+            }
+          }
+        }
+      }
+    }
+
+    return bestMoves.length > 0 ? bestMoves[0] : null;
+  }
+
+  /** 상대가 두 칸에서 형성하는 위협의 타입 평가 (높을수록 위험) */
+  function assessDoubleThreatDanger(r, c, human) {
+    if (board[r][c] !== EMPTY) return -1e15;
+    board[r][c] = human;
+
+    let openFours = 0;
+    let rushFours = 0;
+    let openThrees = 0;
+    let rushThrees = 0;
+
+    for (const [dr, dc] of DIRS) {
+      const ax = axisAfterMove(r, c, dr, dc, human);
+      const sc = axisScore(ax);
+      if (sc >= SC.OPEN_FOUR) openFours++;
+      if (sc >= SC.RUSH_FOUR) rushFours++;
+      if (sc >= SC.OPEN_THREE) openThrees++;
+      if (sc >= SC.RUSH_THREE) rushThrees++;
+    }
+
+    board[r][c] = EMPTY;
+
+    /* 위험 레벨 점수 (높을수록 위험) */
+    let danger = 0;
+    if (openFours >= 2) danger = 10000;  /* 4-4 (열사) */
+    else if (rushFours >= 2) danger = 9800;   /* 4-4 (막세) */
+    else if (openFours >= 1 && rushFours >= 1) danger = 9600;
+    else if (openFours >= 1 && openThrees >= 1) danger = 8000;  /* 4-3 (열사-열삼) */
+    else if (openFours >= 1 && rushThrees >= 1) danger = 7800;  /* 4-3 (열사-막삼) */
+    else if (rushFours >= 1 && openThrees >= 1) danger = 7600;  /* 4-3 (막세-열삼) */
+    else if (rushFours >= 1 && rushThrees >= 1) danger = 7400;  /* 4-3 (막세-막삼) */
+    else if (openThrees >= 2) danger = 5000;  /* 3-3 (열삼-열삼) */
+    else if (openThrees >= 1 && rushThrees >= 1) danger = 4800;  /* 3-3 (열삼-막삼) */
+    else if (rushThrees >= 2) danger = 4600;  /* 3-3 (막삼-막삼) */
+    else {
+      danger = evaluateHypothetical(r, c, human);
+    }
+
+    return danger;
+  }
+
+  /** 상대 이중 위협을 막아야 할 칸 중, 위험도 순으로 최우선 차단점 선택 */
   function findHumanDoubleThreatBlockMove(human) {
     let bestRc = /** @type {[number, number] | null} */ (null);
-    let bestEv = -1;
+    let bestDanger = -Infinity;
     for (let r = 0; r < SIZE; r++) {
       for (let c = 0; c < SIZE; c++) {
         if (board[r][c] !== EMPTY) continue;
         if (!humanMoveFormsDoubleThreat(r, c, human)) continue;
-        const ev = evaluateHypothetical(r, c, human);
-        if (ev > bestEv) {
-          bestEv = ev;
+        const danger = assessDoubleThreatDanger(r, c, human);
+        if (danger > bestDanger) {
+          bestDanger = danger;
           bestRc = [r, c];
         }
       }
@@ -1233,6 +1347,14 @@
       }
     }
 
+    /* 2수 이내 승리 경로 찾기 (명확한 승리 의도) */
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (board[r][c] !== EMPTY) continue;
+        if (canWinInTwoMoves(r, c, ai)) return [r, c];
+      }
+    }
+
     for (let r = 0; r < SIZE; r++) {
       for (let c = 0; c < SIZE; c++) {
         if (board[r][c] !== EMPTY) continue;
@@ -1253,6 +1375,12 @@
      */
     if (blockDouble) {
       return blockDouble;
+    }
+
+    /* 공격적으로 양쪽 끝이 비어있는 3연(열삼) 구축 시도 */
+    const openThreeMove = findAiOpenThreeMove(ai, human);
+    if (openThreeMove) {
+      return openThreeMove;
     }
 
     const stones = boardStoneCount();
